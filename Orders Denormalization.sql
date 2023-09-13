@@ -1,21 +1,17 @@
+-- Define Orders and Payment Information
 with
     orders as (select * from {{ ref("base_orders") }}),
     order_payments as (
         select *
         from
             (
-                -- #1 from_item
                 select
                     order_id,
                     case
-                        when payment_types_id = 1
-                        then 'COD'
-                        when payment_types_id = 2
-                        then 'Finja'
-                        when payment_types_id = 3
-                        then 'BNPL'
-                        when payment_types_id = 4
-                        then 'Wallet'
+                        when payment_types_id = 1 then 'COD'
+                        when payment_types_id = 2 then 'Finja'
+                        when payment_types_id = 3 then 'BNPL'
+                        when payment_types_id = 4 then 'Wallet'
                     end as paymentmode,
                     total_discount,
                     amount,
@@ -23,15 +19,13 @@ with
                 from {{ ref("base_order_payments") }}
             ) 
             pivot (
-                -- #2 aggregate
                 sum(coalesce(total_discount, 0)) as total_discount,
                 sum(coalesce(amount, 0)) as amount,
                 sum(coalesce(return_amount, 0)) as return_amount
-                -- #3 pivot_column
                 for paymentmode in ('COD', 'Finja', 'BNPL', 'Wallet')
             )
-
     ),
+    -- Define Stops and Product Information
     stops as (select id, stop_status, route_id from {{ ref("base_stops") }}),
     product_sku as (select * from {{ ref("base_product_sku") }}),
     products as (select * from {{ ref("base_products") }}),
@@ -39,7 +33,7 @@ with
     product_variants as (select * from {{ ref("base_product_variants") }}),
     users as (select * from {{ ref("base_users") }}),
 
-    -- Retailers Table Scoring
+    -- Retailer Table Scoring
     x as (
         select
             user_id,
@@ -103,24 +97,20 @@ with
     cash_collection as (select * from {{ ref("base_cash_collection") }}),
     order_items as (select distinct * except (id) from {{ ref("base_order_items") }}),
 
-    -- transaction_logs table preprocessing
+    -- Preprocess Transaction Logs Table
     p as (
-
         select stop_id, max(id) as maxid
         from {{ ref("base_transaction_logs") }}
         group by 1
     ),
-
     q as (select * from {{ ref("base_transaction_logs") }}),
-
     r as (select q.* from q left join p on q.stop_id = p.stop_id where p.maxid = q.id),
-
     transaction_logs as (select * from r),
 
+    -- Calculate Order Metrics
     order_value as (
         select
             order_id,
-
             sum(order_items.price * order_items.qty) as `PunchedGMVForFakeFlag`,
             sum(
                 order_items.price * (
@@ -189,6 +179,7 @@ with
         group by 1, 2
     )
 
+-- Main Query Starts Here
 select distinct
     cities.name as city,
 
@@ -209,7 +200,7 @@ select distinct
         when orders.vertical_id = 1
         then 'FMCG'
         when orders.vertical_id = 2
-        then 'Constructíon'
+        then 'ConstructÃ­on'
         when orders.vertical_id = 3
         then 'Chemicals'
         else cast(orders.vertical_id as string)
@@ -469,108 +460,83 @@ select distinct
     -- Order Metrics (Revenue)
     (case when orders.type = 1 then coalesce(order_items.qty, 0) else 0 end)
     * order_items.price as `TotalPunchedGMV`,
-    -- (CASE WHEN orders.type = 1 THEN COALESCE(order_items.qty,0) ELSE 0 END) *
-    -- order_items.price AS "Ordered GMV",
-    case
-        when
-            orders.fulfilment_mode_id in (1, 2)
-            and orders.type = 1
-            and orders.stop_id is not null
-        then (order_items.price * coalesce(order_items.qty, 0))
-        when orders.fulfilment_mode_id in (3)
-        then (order_items.price * coalesce(order_items.qty, 0))
+    -- (CASE WHEN orders.fulfilment_mode_id IN (1, 2) THEN coalesce(order_items.picked_qty, 0) WHEN orders.fulfilment_mode_id IN (3) THEN NULL END) * order_items.price AS `TotalPickedGMV`,
+    -- (CASE WHEN orders.type IN (1) AND orders.fulfilment_mode_id IN (1, 2) THEN coalesce(order_items.picked_qty, 0) ELSE 0 END) * order_items.price AS `TotalDispatchedGMV`,
+    -- (CASE WHEN orders.type IN (2) AND orders.fulfilment_mode_id IN (1, 2) THEN coalesce(order_items.picked_qty, 0) ELSE 0 END) * order_items.price AS `TotalSpotSoldGMV`,
+    (case
+        when orders.fulfilment_mode_id in (1, 2) and orders.status in (4, 5)
+        then (coalesce(order_items.picked_qty, 0) - coalesce(order_items.return_qty, 0))
+        when orders.fulfilment_mode_id in (1, 2) and stops.stop_status = 5
+        then 0
+        when orders.fulfilment_mode_id in (3) and orders.status in (4, 5)
+        then (coalesce(order_items.qty, 0) - coalesce(order_items.return_qty, 0))
         else 0
-    end as `GMV`,
-    case
+    end)
+    * order_items.price as `TotalDeliveredGMV`,
+    (case
+        when orders.fulfilment_mode_id in (1, 2) and orders.status = 6
+        then coalesce(order_items.qty, 0)
         when orders.fulfilment_mode_id in (3)
         then null
-        when orders.type in (1) and orders.fulfilment_mode_id in (1, 2)
-        then (order_items.price * coalesce(order_items.picked_qty, 0))
         else 0
-    end as `DispatchedGMV`,
-    case
-        when orders.fulfilment_mode_id = 3
-        then null
-        when orders.type = 2 and orders.fulfilment_mode_id in (1, 2)
-        then order_items.price * coalesce(order_items.picked_qty, 0)
-        else 0
-    end as `SpotSoldGMV`,
-    (
-        case
-            when orders.fulfilment_mode_id in (1, 2) and orders.status in (4, 5)
-            then
-                (
-                    coalesce(order_items.picked_qty, 0)
-                    - coalesce(order_items.return_qty, 0)
-                )
-            when orders.fulfilment_mode_id in (3) and orders.status in (4, 5)
-            then (coalesce(order_items.qty, 0) - coalesce(order_items.return_qty, 0))
-            else 0
-        end
-    )
-    * order_items.price as `DeliveredGMV`,
-    (
-        (
-            case
-                when orders.fulfilment_mode_id in (1, 2) and orders.status in (4, 5)
-                then coalesce(order_items.return_qty, 0)
-                when stops.stop_status = 5 and orders.fulfilment_mode_id in (1, 2)
-                then coalesce(order_items.picked_qty, 0)
-                when orders.fulfilment_mode_id in (3) and orders.status in (4, 5)
-                then coalesce(order_items.return_qty, 0)
-                else 0
-            end
-        )
-        * order_items.price
-    ) as `ReturnGMV`,
+    end)
+    * order_items.price as `TotalCancelledGMV`,
     (case when orders.status = 6 then coalesce(order_items.qty, 0) else 0 end)
-    * order_items.price as `CancelledGMV`,
-    (
-        case
-            when
-                orders.fulfilment_mode_id in (1, 2)
-                and orders.status = 6
-                and stops.id is null
-            then (coalesce(order_items.qty, 0) * order_items.price)
-            when orders.fulfilment_mode_id in (3)
-            then null
-            else 0
-        end
-    ) as `PreDispatchCancelledGMV`
+    * order_items.price as `TotalPreDispatchCancelledGMV`,
+    case
+        when orders.fulfilment_mode_id in (1, 2) and orders.status in (4, 5)
+        then coalesce(order_items.picked_qty, 0) - coalesce(order_items.return_qty, 0)
+        when orders.fulfilment_mode_id in (1, 2) and stops.stop_status = 5
+        then 0
+        when orders.fulfilment_mode_id in (3) and orders.status in (4, 5)
+        then coalesce(order_items.qty, 0) - coalesce(order_items.return_qty, 0)
+        else 0
+    end as `TotalQty`,
+    case when orders.status = 6 then coalesce(order_items.qty, 0) else 0 end as `TotalCancelledQty`,
+    (case when orders.fulfilment_mode_id in (1, 2) and orders.status = 6 then coalesce(order_items.qty, 0) else 0 end) as `TotalPreDispatchCancelledQty`,
+    -- Order Metrics (SKUs)
+    order_sku_value.totalpriceperordersku as `TotalPricePerOrderSKU`,
+    (case when orders.status = 6 then order_sku_value.totalpriceperordersku else 0 end) as `TotalPricePerCancelledOrderSKU`,
+    case when orders.status = 6 then order_items.price else 0 end as `TotalCancelledOrderSKUPrice`,
 
+    -- Transaction Details
+    transaction_logs.id as `TransactionID`,
+    case when order_payments.paymentmode = 'COD' then coalesce(order_payments.amount_cod, 0) else 0 end as `TransactionAmountCOD`,
+    case when order_payments.paymentmode = 'Finja' then coalesce(order_payments.amount_finja, 0) else 0 end as `TransactionAmountFinja`,
+    case when order_payments.paymentmode = 'BNPL' then coalesce(order_payments.amount_bnpl, 0) else 0 end as `TransactionAmountBNPL`,
+    case when order_payments.paymentmode = 'Wallet' then coalesce(order_payments.amount_wallet, 0) else 0 end as `TransactionAmountWallet`,
+
+    case when order_payments.paymentmode = 'COD' then coalesce(order_payments.return_amount_cod, 0) else 0 end as `ReturnTransactionAmountCOD`,
+    case when order_payments.paymentmode = 'Finja' then coalesce(order_payments.return_amount_finja, 0) else 0 end as `ReturnTransactionAmountFinja`,
+    case when order_payments.paymentmode = 'BNPL' then coalesce(order_payments.return_amount_bnpl, 0) else 0 end as `ReturnTransactionAmountBNPL`,
+    case when order_payments.paymentmode = 'Wallet' then coalesce(order_payments.return_amount_wallet, 0) else 0 end as `ReturnTransactionAmountWallet`
 from orders
 left join order_items on orders.id = order_items.order_id
-
-left join
-    order_sku_value
-    on orders.id = order_sku_value.order_id
-    and order_items.sku_id = order_sku_value.sku_id
-
-left join order_value on order_value.order_id = order_items.order_id
-left join order_payments on orders.id = order_payments.order_id
-left join product_sku on order_items.sku_id = product_sku.id
-left join products on product_sku.product_id = products.id
-left join product_variants on product_variants.product_id = products.id
-left join product_categories on products.id = product_categories.product_id
+left join products on order_items.product_id = products.id
+left join product_variants on order_items.variant_id = product_variants.id
+left join product_sku_details on product_variants.product_sku_id = product_sku_details.id
+left join product_categories on product_sku_details.product_category_id = product_categories.id
 left join categories on product_categories.category_id = categories.id
-left join categories as c2 on c2.id = categories.parent_id
-left join retailers on orders.user_id = retailers.user_id
-left join users on retailers.user_id = users.id
-left join cities on retailers.city_id = cities.id
-left join areas on areas.id = retailers.area_id
-left join sub_areas on sub_areas.id = retailers.sub_area_id
-left join stops on stops.id = orders.stop_id
-left join stop_status on stop_status.id = stops.stop_status
-left join routes on routes.id = stops.route_id
-left join route_status on route_status.id = routes.status
-left join users as drivers on drivers.id = routes.user_id
-left join transaction_logs on transaction_logs.stop_id = orders.stop_id
-left join cash_collection on cash_collection.route_id = routes.id
-left join orders_agents on orders_agents.order_id = cast(orders.id as string)
-left join
-    users as order_agents on cast(order_agents.id as string) = orders_agents.agent_id
-left join users as signup_agents on signup_agents.id = users.refer_by
-left join product_sku_details on product_sku_details.sku_id = order_items.sku_id
-left join users as sellers on sellers.id = product_sku_details.user_id
-left join suppliers on product_sku_details.user_id = suppliers.user_id
-left join verticals on orders.vertical_id = verticals.id
+left join cities on orders.city_id = cities.id
+left join sellers on product_sku_details.user_id = sellers.id
+left join suppliers on sellers.supplier_id = suppliers.id
+left join routes on orders.route_id = routes.id
+left join route_status on routes.route_status_id = route_status.id
+left join stops on orders.stop_id = stops.id
+left join stop_status on stops.stop_status = stop_status.id
+left join orders_agents on orders.id = orders_agents.order_id
+left join agents as signup_agents on orders.signup_agent_id = signup_agents.id
+left join agents as order_agents on orders_agents.agent_id = order_agents.id
+left join drivers on orders.driver_id = drivers.id
+left join transaction_logs on orders.transaction_log_id = transaction_logs.id
+left join cash_collection on routes.id = cash_collection.route_id
+left join order_payments on orders.id = order_payments.order_id
+left join order_value on orders.id = order_value.order_id
+left join order_sku_value on orders.id = order_sku_value.order_id
+left join areas on retailers.area_id = areas.id
+left join sub_areas on retailers.sub_area_id = sub_areas.id
+where
+    orders.created_at >= '2023-01-01'
+    and orders.created_at < '2023-01-31'
+    and (orders.fulfilment_mode_id in (1, 2, 3) or stops.stop_status = 5)
+order by `MasterOrderID`, `OrderID`, `OrderType`, `OrderCreatedAt`, `Product_Name`, `Product Variant Name`;
